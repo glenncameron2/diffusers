@@ -73,6 +73,7 @@ def parse_args():
         default=None,
         help="Pretrained tokenizer name or path if not the same as model_name",
     )
+    """
     parser.add_argument(
         "--instance_data_dir",
         type=str,
@@ -80,6 +81,8 @@ def parse_args():
         required=True,
         help="A folder containing the training data of instance images.",
     )
+    """
+    """
     parser.add_argument(
         "--class_data_dir",
         type=str,
@@ -87,18 +90,21 @@ def parse_args():
         required=False,
         help="A folder containing the training data of class images.",
     )
+    """
     parser.add_argument(
         "--instance_prompt",
         type=str,
         default=None,
         help="The prompt with identifier specifying the instance",
     )
+    """
     parser.add_argument(
         "--class_prompt",
         type=str,
         default=None,
         help="The prompt to specify images in the same class as provided instance images.",
     )
+    """
 
     parser.add_argument(
         "--concepts_list",
@@ -214,14 +220,14 @@ def parse_args():
     if env_local_rank != -1 and env_local_rank != args.local_rank:
         args.local_rank = env_local_rank
 
-    if args.instance_data_dir is None:
-        raise ValueError("You must specify a train data directory.")
+    #if args.instance_data_dir is None:
+        #raise ValueError("You must specify a train data directory.")
     #can delete the following
-    if args.with_prior_preservation:
-        if args.class_data_dir is None:
-            raise ValueError("You must specify a data directory for class images.")
-        if args.class_prompt is None:
-            raise ValueError("You must specify prompt for class images.")
+    #if args.with_prior_preservation:
+        #if args.class_data_dir is None:
+            #raise ValueError("You must specify a data directory for class images.")
+        #if args.class_prompt is None:
+            #raise ValueError("You must specify prompt for class images.")
 
     return args
 
@@ -235,11 +241,11 @@ class DreamBoothDataset(Dataset):
     def __init__(
         self,
         concepts_list,
-        instance_data_root,
+        #instance_data_root,
         tokenizer,
         with_prior_preservation=True,
         class_data_root=None,
-        class_prompt=None,
+        #class_prompt=None,
         num_class_images=None,
         class_num=None,
         size=512,
@@ -488,10 +494,10 @@ def main():
 
     train_dataset = DreamBoothDataset(
         concepts_list=args.concepts_list,
-        instance_data_root=args.instance_data_dir,
+        #instance_data_root=args.instance_data_dir,
         #instance_prompt=args.instance_prompt,
         #class_data_root=args.class_data_dir if args.with_prior_preservation else None,
-        class_prompt=args.class_prompt,
+        #class_prompt=args.class_prompt,
         class_num=args.num_class_images,
         tokenizer=tokenizer,
         size=args.resolution,
