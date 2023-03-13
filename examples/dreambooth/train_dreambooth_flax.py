@@ -23,6 +23,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPFeatureExtractor, CLIPTokenizer, FlaxCLIPTextModel, set_seed
+import json
 
 from diffusers import (
     FlaxAutoencoderKL,
@@ -97,6 +98,13 @@ def parse_args():
         type=str,
         default=None,
         help="The prompt to specify images in the same class as provided instance images.",
+    )
+
+    parser.add_argument(
+        "--concepts_list",
+        type=str,
+        default=None,
+        help="Path to json containing multiple concepts, will overwrite parameters like instance_prompt, class_prompt, etc.",
     )
     parser.add_argument(
         "--with_prior_preservation",
@@ -208,7 +216,7 @@ def parse_args():
 
     if args.instance_data_dir is None:
         raise ValueError("You must specify a train data directory.")
-
+    #can delete the following
     if args.with_prior_preservation:
         if args.class_data_dir is None:
             raise ValueError("You must specify a data directory for class images.")
@@ -226,11 +234,13 @@ class DreamBoothDataset(Dataset):
 
     def __init__(
         self,
+        concepts_list,
         instance_data_root,
-        instance_prompt,
         tokenizer,
+        with_prior_preservation=True,
         class_data_root=None,
         class_prompt=None,
+        num_class_images=None,
         class_num=None,
         size=512,
         center_crop=False,
@@ -238,16 +248,39 @@ class DreamBoothDataset(Dataset):
         self.size = size
         self.center_crop = center_crop
         self.tokenizer = tokenizer
+        self.with_prior_preservation = with_prior_preservation
+        self.instance_images_path = []
+        self.class_images_path = []
 
-        self.instance_data_root = Path(instance_data_root)
-        if not self.instance_data_root.exists():
-            raise ValueError("Instance images root doesn't exists.")
+        for concept in concepts_list:
+            inst_img_path = [
+                (x, concept["instance_prompt"])
+                for x in Path(concept["instance_data_dir"]).iterdir()
+                if x.is_file() and not str(x).endswith(".txt")
+            ]
+            self.instance_images_path.extend(inst_img_path)
 
-        self.instance_images_path = list(Path(instance_data_root).iterdir())
+            if with_prior_preservation:
+                class_img_path = [(x, concept["class_prompt"]) for x in Path(concept["class_data_dir"]).iterdir() if
+                                  x.is_file()]
+                self.class_images_path.extend(class_img_path[:num_class_images])
+
+        #self.instance_data_root = Path(instance_data_root)
+        #if not self.instance_data_root.exists():
+            #raise ValueError("Instance images root doesn't exists.")
+
+        #random.shuffle(self.instance_images_path)
         self.num_instance_images = len(self.instance_images_path)
-        self.instance_prompt = instance_prompt
-        self._length = self.num_instance_images
+        self.num_class_images = len(self.class_images_path)
+        self._length = max(self.num_class_images, self.num_instance_images)
 
+        #next 4 lines should be removed
+        #self.instance_images_path = list(Path(instance_data_root).iterdir())
+        #self.num_instance_images = len(self.instance_images_path)
+        #self.instance_prompt = instance_prompt
+        #self._length = self.num_instance_images
+
+        """
         if class_data_root is not None:
             self.class_data_root = Path(class_data_root)
             self.class_data_root.mkdir(parents=True, exist_ok=True)
@@ -260,6 +293,7 @@ class DreamBoothDataset(Dataset):
             self.class_prompt = class_prompt
         else:
             self.class_data_root = None
+        """
 
         self.image_transforms = transforms.Compose(
             [
@@ -275,28 +309,44 @@ class DreamBoothDataset(Dataset):
 
     def __getitem__(self, index):
         example = {}
-        instance_image = Image.open(self.instance_images_path[index % self.num_instance_images])
+        #instance_image = Image.open(self.instance_images_path[index % self.num_instance_images])
+        #print(self.instance_images_path)
+        instance_path, instance_prompt = self.instance_images_path[index % self.num_instance_images]
+
+        """
+        if self.read_prompts_from_txts:
+            with open(str(instance_path) + ".txt") as f:
+                instance_prompt = f.read().strip()
+        """
+
+        instance_image = Image.open(instance_path)
+
         if not instance_image.mode == "RGB":
             instance_image = instance_image.convert("RGB")
+
         example["instance_images"] = self.image_transforms(instance_image)
         example["instance_prompt_ids"] = self.tokenizer(
-            self.instance_prompt,
+            instance_prompt,
             padding="do_not_pad",
             truncation=True,
             max_length=self.tokenizer.model_max_length,
         ).input_ids
 
-        if self.class_data_root:
-            class_image = Image.open(self.class_images_path[index % self.num_class_images])
+        if self.with_prior_preservation: #should use this because dont need class roo
+        #if self.class_data_root:
+            #class_image = Image.open(self.class_images_path[index % self.num_class_images])
+            class_path, class_prompt = self.class_images_path[index % self.num_class_images]
+            class_image = Image.open(class_path)
             if not class_image.mode == "RGB":
                 class_image = class_image.convert("RGB")
             example["class_images"] = self.image_transforms(class_image)
             example["class_prompt_ids"] = self.tokenizer(
-                self.class_prompt,
+                class_prompt,
                 padding="do_not_pad",
                 truncation=True,
                 max_length=self.tokenizer.model_max_length,
             ).input_ids
+
 
         return example
 
@@ -352,43 +402,61 @@ def main():
 
     rng = jax.random.PRNGKey(args.seed)
 
+    if args.concepts_list is None:
+        args.concepts_list = [
+            {
+                "instance_prompt": args.instance_prompt,
+                "class_prompt": args.class_prompt,
+                "instance_data_dir": args.instance_data_dir,
+                "class_data_dir": args.class_data_dir
+            }
+        ]
+    else:
+        with open(args.concepts_list, "r") as f:
+            args.concepts_list = json.load(f)
+
     if args.with_prior_preservation:
-        class_images_dir = Path(args.class_data_dir)
-        if not class_images_dir.exists():
-            class_images_dir.mkdir(parents=True)
-        cur_class_images = len(list(class_images_dir.iterdir()))
+        pipeline = None
+        for concept in args.concepts_list:
+            class_images_dir = Path(concept["class_data_dir"])
+            if not class_images_dir.exists():
+                class_images_dir.mkdir(parents=True)
+            cur_class_images = len(list(class_images_dir.iterdir()))
 
-        if cur_class_images < args.num_class_images:
-            pipeline, params = FlaxStableDiffusionPipeline.from_pretrained(
-                args.pretrained_model_name_or_path, safety_checker=None, revision=args.revision
-            )
-            pipeline.set_progress_bar_config(disable=True)
+            if cur_class_images < args.num_class_images:
+                if pipeline is None:
+                    #print(args.pretrained_model_name_or_path)
+                    pipeline, params = FlaxStableDiffusionPipeline.from_pretrained(
+                        args.pretrained_model_name_or_path, safety_checker=None, revision=args.revision
+                    )
+                    pipeline.set_progress_bar_config(disable=True)
 
-            num_new_images = args.num_class_images - cur_class_images
-            logger.info(f"Number of class images to sample: {num_new_images}.")
+                num_new_images = args.num_class_images - cur_class_images
+                logger.info(f"Number of class images to sample: {num_new_images}.")
 
-            sample_dataset = PromptDataset(args.class_prompt, num_new_images)
-            total_sample_batch_size = args.sample_batch_size * jax.local_device_count()
-            sample_dataloader = torch.utils.data.DataLoader(sample_dataset, batch_size=total_sample_batch_size)
+                #sample_dataset = PromptDataset(args.class_prompt, num_new_images)
+                sample_dataset = PromptDataset(concept["class_prompt"], num_new_images)
+                total_sample_batch_size = args.sample_batch_size * jax.local_device_count()
+                sample_dataloader = torch.utils.data.DataLoader(sample_dataset, batch_size=total_sample_batch_size)
 
-            for example in tqdm(
-                sample_dataloader, desc="Generating class images", disable=not jax.process_index() == 0
-            ):
-                prompt_ids = pipeline.prepare_inputs(example["prompt"])
-                prompt_ids = shard(prompt_ids)
-                p_params = jax_utils.replicate(params)
-                rng = jax.random.split(rng)[0]
-                sample_rng = jax.random.split(rng, jax.device_count())
-                images = pipeline(prompt_ids, p_params, sample_rng, jit=True).images
-                images = images.reshape((images.shape[0] * images.shape[1],) + images.shape[-3:])
-                images = pipeline.numpy_to_pil(np.array(images))
+                for example in tqdm(
+                    sample_dataloader, desc="Generating class images", disable=not jax.process_index() == 0
+                ):
+                    prompt_ids = pipeline.prepare_inputs(example["prompt"])
+                    prompt_ids = shard(prompt_ids)
+                    p_params = jax_utils.replicate(params)
+                    rng = jax.random.split(rng)[0]
+                    sample_rng = jax.random.split(rng, jax.device_count())
+                    images = pipeline(prompt_ids, p_params, sample_rng, jit=True).images
+                    images = images.reshape((images.shape[0] * images.shape[1],) + images.shape[-3:])
+                    images = pipeline.numpy_to_pil(np.array(images))
 
-                for i, image in enumerate(images):
-                    hash_image = hashlib.sha1(image.tobytes()).hexdigest()
-                    image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
-                    image.save(image_filename)
+                    for i, image in enumerate(images):
+                        hash_image = hashlib.sha1(image.tobytes()).hexdigest()
+                        image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
+                        image.save(image_filename)
 
-            del pipeline
+        del pipeline
 
     # Handle the repository creation
     if jax.process_index() == 0:
@@ -419,9 +487,10 @@ def main():
         raise NotImplementedError("No tokenizer specified!")
 
     train_dataset = DreamBoothDataset(
+        concepts_list=args.concepts_list,
         instance_data_root=args.instance_data_dir,
-        instance_prompt=args.instance_prompt,
-        class_data_root=args.class_data_dir if args.with_prior_preservation else None,
+        #instance_prompt=args.instance_prompt,
+        #class_data_root=args.class_data_dir if args.with_prior_preservation else None,
         class_prompt=args.class_prompt,
         class_num=args.num_class_images,
         tokenizer=tokenizer,
